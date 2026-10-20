@@ -19,6 +19,7 @@
 
 import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 import { Buffer } from "buffer";
+import { globalSessionRevocationRegistry } from "./sessionRevocationService";
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -180,6 +181,18 @@ export function verifyAdminToken(
   }
   if (isAdminTokenRevoked(payload.nonce)) {
     throw new AdminTokenError("revoked", "Admin token has been revoked.");
+  }
+  const securityRevocation = globalSessionRevocationRegistry.isRevoked(
+    payload.sub,
+    payload.issuedAt,
+    payload.nonce,
+    now,
+  );
+  if (securityRevocation.revoked) {
+    throw new AdminTokenError(
+      "revoked",
+      `Admin token has been revoked by security event: ${securityRevocation.reason ?? "security policy"}`,
+    );
   }
   if (!Array.isArray(payload.scope) || !payload.scope.includes(opts.requiredScope)) {
     throw new AdminTokenError(

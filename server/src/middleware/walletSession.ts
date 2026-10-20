@@ -21,6 +21,7 @@ import {
   verifyChallengeSignature,
   verifyChallengeToken,
 } from "../../../src/lib/auth/challenge";
+import { globalSessionRevocationRegistry } from "../services/sessionRevocationService";
 
 const SESSION_SUBJECT = "wallet-session";
 const CHALLENGE_ACTION = "wallet_session_challenge";
@@ -110,12 +111,27 @@ export function requireWalletSession(walletOf: (req: Request) => unknown) {
 
     const header = req.headers.authorization;
     const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    let payload;
     try {
-      verifyChallengeToken(secret, token, wallet, SESSION_SUBJECT, Date.now(), {
+      payload = verifyChallengeToken(secret, token, wallet, SESSION_SUBJECT, Date.now(), {
         action: SESSION_ACTION,
       });
     } catch {
       res.status(401).json({ error: "A valid wallet session for this wallet is required." });
+      return;
+    }
+
+    const revocation = globalSessionRevocationRegistry.isRevoked(
+      wallet,
+      payload.issuedAt,
+      payload.nonce,
+    );
+    if (revocation.revoked) {
+      res.status(401).json({
+        error: "Wallet session has been revoked following a security event.",
+        code: revocation.code,
+        reason: revocation.reason,
+      });
       return;
     }
 
@@ -149,6 +165,9 @@ export function hasFreshWalletSession(
     const payload = verifyChallengeToken(secret, token, normalized, SESSION_SUBJECT, now, {
       action: SESSION_ACTION,
     });
+    if (globalSessionRevocationRegistry.isRevoked(normalized, payload.issuedAt, payload.nonce, now).revoked) {
+      return false;
+    }
     return now - payload.issuedAt <= maxAgeMs;
   } catch {
     return false;
