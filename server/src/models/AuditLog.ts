@@ -85,6 +85,8 @@ export const AUDIT_ACTIONS = [
   "maintainer_note_redacted",
   "maintainer_note_archived",
   "maintainer_note_accessed",
+  // failure escalation (#904)
+  "failure_escalated",
   // retention holds
   "retention_hold_created",
   "retention_hold_released",

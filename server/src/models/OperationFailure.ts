@@ -45,6 +45,16 @@ export interface IOperationFailure extends Document {
   resolutionNotes?: string;
   
   metadata: Record<string, unknown>;
+
+  // Escalation state for unresolved failures (#904). Written by the escalation sweep.
+  escalation?: {
+    notificationsSent?: number;
+    notificationAttempts?: number;
+    lastEscalatedAt?: Date | null;
+    lastAttemptAt?: Date | null;
+    policyVersion?: number;
+    lastError?: string;
+  };
   
   createdAt: Date;
   updatedAt: Date;
@@ -153,6 +163,10 @@ const OperationFailureSchema = new Schema<IOperationFailure>(
     },
     
     metadata: {
+      type: Schema.Types.Mixed,
+      default: {},
+    },
+    escalation: {
       type: Schema.Types.Mixed,
       default: {},
     },
