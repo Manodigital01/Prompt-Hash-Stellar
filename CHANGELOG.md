@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Replay, snapshot, dispute and session hardening (Issues #905, #906, #907, #908)
+- Replay validation (#905): journal rows are shape-checked before reducers run.
+  Malformed rows stop strict runs and are counted and sampled in lenient runs,
+  and block activation. Reducer errors and a checkpoint event that has left the
+  journal stop the run with the event named. See `docs/operations/event-replay.md`.
+- Snapshot validation (#906): read-only `npm run backup:validate` checks a local
+  backup for checksum and size mismatches, missing or unexpected records,
+  malformed lines, duplicate keys, orphaned references and inconsistent indexer
+  state. See `docs/operations/backup-and-recovery.md`.
+- Ownership transfer disputes (#907): either party can dispute an approved
+  transfer within 14 days. An open dispute holds the listing (new transfer
+  requests get `423`). Maintainers accept (listing reverted) or reject. All
+  transitions are audited. See `docs/operations/ownership-transfer-disputes.md`.
+- Security event session policy (#908): credential, role and recovery changes,
+  and logout-all, end the account's earlier sessions. Revoked sessions get a
+  user-safe message, and the internal reason is no longer returned to clients.
+  See `docs/operations/stale-session-revocation.md`.
+
 #### Admin governance controls (Issues #909, #910, #911, #912)
 - Schema-driven config validation (#909): feature-flag PATCH bodies are checked
   against `FEATURE_FLAG_UPDATE_SCHEMA` before any write, returning 400 with field
