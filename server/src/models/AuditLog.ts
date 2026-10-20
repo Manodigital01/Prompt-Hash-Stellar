@@ -77,6 +77,8 @@ export const AUDIT_ACTIONS = [
   "step_up_verified",
   "step_up_failed",
   "step_up_locked",
+  // duplicate-record merges (#902)
+  "record_merge_committed",
   // retention holds
   "retention_hold_created",
   "retention_hold_released",
