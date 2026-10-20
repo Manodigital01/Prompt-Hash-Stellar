@@ -1,6 +1,7 @@
 import SupportCase, { SupportCaseType, SupportCaseStatus, CaseResolution } from "../models/SupportCase.js";
 import Purchase from "../models/Purchase.js";
 import { logger } from "./auditTrail.js";
+import { supportCaseTimelineService } from "./supportCaseTimelineService.js";
 
 export interface CreateCaseInput {
   type: SupportCaseType;
@@ -41,6 +42,19 @@ class SupportCaseService {
     });
 
     await caseDoc.save();
+    await supportCaseTimelineService.append({
+      caseId: String(caseDoc._id),
+      type: "status",
+      actor: input.buyerWallet,
+      actorType: "user",
+      payload: { from: null, to: "open", title: input.title },
+    });
+    if (input.evidenceUrls?.length) {
+      await supportCaseTimelineService.append({
+        caseId: String(caseDoc._id), type: "evidence", actor: input.buyerWallet,
+        actorType: "user", payload: { count: input.evidenceUrls.length },
+      });
+    }
     logger.info(`Support case created: ${caseDoc._id} for prompt ${input.promptId}`);
     return caseDoc;
   }
@@ -65,6 +79,13 @@ class SupportCaseService {
     return SupportCase.findById(caseId);
   }
 
+  async getPublicCaseById(caseId: string): Promise<any> {
+    const caseDoc = await SupportCase.findById(caseId).lean();
+    if (!caseDoc) return null;
+    const { notes: _privateNotes, ...safeCase } = caseDoc as any;
+    return safeCase;
+  }
+
   async getCasesBuyerWallet(wallet: string): Promise<any[]> {
     return SupportCase.find({
       buyerWallet: wallet.toLowerCase(),
@@ -80,6 +101,8 @@ class SupportCaseService {
   }
 
   async updateCase(caseId: string, input: UpdateCaseInput): Promise<any> {
+    const before = await SupportCase.findById(caseId).select("status assignedTo resolution");
+    if (!before) throw new Error(`Case not found: ${caseId}`);
     const updateData: any = { ...input };
 
     if (input.resolution) {
@@ -93,6 +116,17 @@ class SupportCaseService {
 
     if (!caseDoc) {
       throw new Error(`Case not found: ${caseId}`);
+    }
+
+    const actor = input.assignedTo || "maintainer";
+    if (input.status && input.status !== before.status) {
+      await supportCaseTimelineService.append({ caseId, type: "status", visibility: "user", actor, actorType: "maintainer", payload: { from: before.status, to: input.status } });
+    }
+    if (input.status === "in_progress" && before.status !== "in_progress") {
+      await supportCaseTimelineService.append({ caseId, type: "escalation", visibility: "private", actor, actorType: "maintainer", payload: { assignedTo: input.assignedTo ?? null } });
+    }
+    if (input.resolution) {
+      await supportCaseTimelineService.append({ caseId, type: "resolution", visibility: "user", actor, actorType: "maintainer", payload: { resolution: input.resolution, note: input.resolutionNote ?? null } });
     }
 
     logger.info(`Support case updated: ${caseId}`);
@@ -113,6 +147,11 @@ class SupportCaseService {
     });
 
     await caseDoc.save();
+    await supportCaseTimelineService.append({
+      caseId, type: "note", visibility: input.isPrivate ? "private" : "user",
+      actor: input.author, actorType: input.isPrivate ? "maintainer" : "user",
+      payload: { text: input.text },
+    });
     logger.info(`Note added to case ${caseId}`);
     return caseDoc;
   }
@@ -123,7 +162,15 @@ class SupportCaseService {
       throw new Error(`Case not found: ${caseId}`);
     }
 
-    return caseDoc.notes.filter((note) => !note.isPrivate);
+    return caseDoc.notes.filter((note: { isPrivate: boolean }) => !note.isPrivate);
+  }
+
+  async getTimeline(caseId: string, includePrivate = false) {
+    return supportCaseTimelineService.list(caseId, includePrivate);
+  }
+
+  async verifyTimeline(caseId: string) {
+    return supportCaseTimelineService.verify(caseId);
   }
 
   async getVisibleNotes(caseId: string, userWallet: string, isAdmin: boolean): Promise<any[]> {
@@ -138,7 +185,7 @@ class SupportCaseService {
 
     // Buyers see all public notes and their own private notes
     return caseDoc.notes.filter(
-      (note) => !note.isPrivate || note.author === userWallet.toLowerCase()
+      (note: { isPrivate: boolean; author: string }) => !note.isPrivate || note.author === userWallet.toLowerCase()
     );
   }
 

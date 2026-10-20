@@ -85,10 +85,22 @@ supportCaseRouter.post(
 
 // Get case by ID
 supportCaseRouter.get(
+  "/:caseId/timeline",
+  async (req, res) => {
+    try {
+      const timeline = await supportCaseService.getTimeline(req.params.caseId, false);
+      res.json({ data: timeline });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+supportCaseRouter.get(
   "/:caseId",
   async (req, res) => {
     try {
-      const caseDoc = await supportCaseService.getCaseById(req.params.caseId);
+      const caseDoc = await supportCaseService.getPublicCaseById(req.params.caseId);
       if (!caseDoc) {
         return res.status(404).json({ error: "Case not found" });
       }
@@ -143,7 +155,8 @@ supportCaseRouter.post(
         text,
         isPrivate,
       });
-      res.json(caseDoc);
+      const safeCase = await supportCaseService.getPublicCaseById(req.params.caseId);
+      res.json(safeCase);
     } catch (err: any) {
       res.status(400).json({ error: err.message });
     }

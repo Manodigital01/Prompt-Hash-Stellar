@@ -124,6 +124,8 @@ const supportCaseSchema = new mongoose.Schema<ISupportCase>(
     resolvedAt: {
       type: Date,
     },
+    // Timeline events are the append-only source for case activity. The
+    // legacy notes/evidence fields remain for backwards-compatible reads.
   },
   { timestamps: true }
 );
