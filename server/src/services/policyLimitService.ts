@@ -1,5 +1,6 @@
 import { logger } from "./structuredLogger";
 import { recordAuditEvent } from "./auditTrail";
+import { diffDigest } from "./permissionDiff";
 
 export type OperationCategory = "STORAGE" | "INDEXING" | "COMPUTE" | "EXTERNAL_SERVICES";
 
@@ -35,6 +36,40 @@ export interface PolicyOverride {
   grantedBy: string;
   createdAt: number;
   revokedAt?: number;
+}
+
+export type OverrideScopeType = PolicyOverride["scopeType"];
+
+export type PolicyOverrideChange =
+  | {
+      action: "create";
+      scopeType: OverrideScopeType;
+      scopeValue: string;
+      operation: ExpensiveOperation;
+      limit: number;
+      durationSeconds: number;
+    }
+  | { action: "revoke"; overrideId: string };
+
+/**
+ * Permission-diff report for a policy override change (#1036). Limits are
+ * "higher is more permissive" for both rate and size policies, so
+ * `loosened` means the change relaxes protection.
+ */
+export interface PolicyOverrideDiffReport {
+  action: PolicyOverrideChange["action"];
+  operation: ExpensiveOperation;
+  scopeType: OverrideScopeType;
+  scopeValue: string;
+  defaultLimit: number;
+  effectiveLimitBefore: number;
+  effectiveLimitAfter: number;
+  direction: "loosened" | "tightened" | "unchanged";
+  /** Active override at the same scope that this change replaces or removes. */
+  affectedOverrideId: string | null;
+  /** Global scope applies to every actor without a more specific override. */
+  isBroad: boolean;
+  digest: string;
 }
 
 export interface PolicyEvaluationResult {
@@ -176,13 +211,81 @@ class PolicyLimitService {
     ].filter(Boolean) as string[];
 
     for (const key of scopeKeys) {
-      const override = this.overrides.get(key);
-      if (override && !override.revokedAt && override.expiresAt > now) {
+      const override = this.activeOverride(key, now);
+      if (override) {
         return { limit: override.limit, override };
       }
     }
 
     return { limit: defaultLimit };
+  }
+
+  private activeOverride(key: string, now: number): PolicyOverride | undefined {
+    const override = this.overrides.get(key);
+    return override && !override.revokedAt && override.expiresAt > now ? override : undefined;
+  }
+
+  /**
+   * Permission-diff report for an override change, without applying it
+   * (#1036). Effective limits are those an actor matched only by the target
+   * scope would see, using the same precedence as `resolveLimit`. Returns
+   * null when a revoke names no active override.
+   *
+   * Time: O(1) for create (keyed lookups), O(n) over overrides for revoke.
+   */
+  public previewOverrideChange(
+    change: PolicyOverrideChange,
+    now: number = Date.now(),
+  ): PolicyOverrideDiffReport | null {
+    let scopeType: OverrideScopeType;
+    let scopeValue: string;
+    let operation: ExpensiveOperation;
+    let affected: PolicyOverride | undefined;
+
+    if (change.action === "create") {
+      scopeType = change.scopeType;
+      scopeValue = scopeType === "wallet" ? change.scopeValue.toLowerCase() : change.scopeValue;
+      operation = change.operation;
+      affected = this.activeOverride(`${scopeType}:${scopeValue}:${operation}`, now);
+    } else {
+      affected = Array.from(this.overrides.values()).find(
+        (o) => o.overrideId === change.overrideId && !o.revokedAt && o.expiresAt > now,
+      );
+      if (!affected) return null;
+      ({ scopeType, scopeValue, operation } = affected);
+    }
+
+    const defaultLimit = POLICIES[operation].defaultLimit;
+    const fallbackLimit =
+      scopeType === "global"
+        ? defaultLimit
+        : (this.activeOverride(`global:*:${operation}`, now)?.limit ?? defaultLimit);
+    const effectiveLimitBefore = affected?.limit ?? fallbackLimit;
+    const effectiveLimitAfter = change.action === "create" ? change.limit : fallbackLimit;
+    const request = change.action === "create" ? { ...change, scopeValue } : change;
+
+    return {
+      action: change.action,
+      operation,
+      scopeType,
+      scopeValue,
+      defaultLimit,
+      effectiveLimitBefore,
+      effectiveLimitAfter,
+      direction:
+        effectiveLimitAfter > effectiveLimitBefore
+          ? "loosened"
+          : effectiveLimitAfter < effectiveLimitBefore
+            ? "tightened"
+            : "unchanged",
+      affectedOverrideId: affected?.overrideId ?? null,
+      isBroad: scopeType === "global",
+      digest: diffDigest({
+        request,
+        before: { limit: effectiveLimitBefore, overrideId: affected?.overrideId ?? null },
+        after: { limit: effectiveLimitAfter },
+      }),
+    };
   }
 
   /**

@@ -46,8 +46,12 @@ describe('PermissionPreviewService', () => {
       explicitConfirmation: true,
       requestorRole: 'admin',
     };
+    const { digest } = PermissionPreviewService.previewUpdate(baseContext, updateReq);
 
-    const newContext = PermissionPreviewService.applyUpdate(baseContext, updateReq);
+    const newContext = PermissionPreviewService.applyUpdate(baseContext, {
+      ...updateReq,
+      expectedDiffDigest: digest,
+    });
     expect(newContext.permissions.has('new_global_permission')).toBe(true);
   });
 
@@ -85,5 +89,105 @@ describe('PermissionPreviewService', () => {
     expect(() => {
       PermissionPreviewService.applyUpdate(baseContext, updateReq);
     }).toThrow('Stale policy input: The policy has been modified by someone else.');
+  });
+});
+
+describe('PermissionPreviewService permission-diff report (#1036)', () => {
+  const creator = (): AuthContext => ({
+    userId: 'user123',
+    walletAddress: 'wallet123',
+    role: 'creator',
+    permissions: new Set(ROLE_PERMISSIONS['creator']),
+  });
+  const promoteToModerator: UpdateRequest = {
+    targetUserId: 'user123',
+    newRole: 'moderator',
+    explicitConfirmation: true,
+    requestorRole: 'admin',
+  };
+
+  it('reports added, removed, and privileged permissions before a role change', () => {
+    const report = PermissionPreviewService.previewUpdate(creator(), promoteToModerator);
+
+    expect(report.added).toEqual([...ROLE_PERMISSIONS['moderator']].filter((p) => p !== 'access_notifications').sort());
+    expect(report.removed).toEqual([...ROLE_PERMISSIONS['creator']].filter((p) => p !== 'access_notifications').sort());
+    // Moderator powers are outside the buyer/creator baseline.
+    expect(report.privilegedGrants).toEqual(report.added);
+    expect(report.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('applies a change whose reviewed digest matches the current state', () => {
+    const report = PermissionPreviewService.previewUpdate(creator(), promoteToModerator);
+    const next = PermissionPreviewService.applyUpdate(creator(), {
+      ...promoteToModerator,
+      expectedDiffDigest: report.digest,
+    });
+    expect(next.role).toBe('moderator');
+    expect(next.permissions).toEqual(new Set(ROLE_PERMISSIONS['moderator']));
+  });
+
+  it('refuses to apply a change without a reviewed report', () => {
+    expect(() => PermissionPreviewService.applyUpdate(creator(), promoteToModerator)).toThrow(
+      'Permission-diff report required',
+    );
+  });
+
+  it('rejects a stale report when the target changed after review', () => {
+    const report = PermissionPreviewService.previewUpdate(creator(), promoteToModerator);
+    const changed = creator();
+    changed.permissions.add('view_flagged_content'); // concurrent grant by another admin
+
+    expect(() =>
+      PermissionPreviewService.applyUpdate(changed, {
+        ...promoteToModerator,
+        expectedDiffDigest: report.digest,
+      }),
+    ).toThrow('Stale permission diff');
+  });
+
+  it('rejects a report reused for a different change', () => {
+    const report = PermissionPreviewService.previewUpdate(creator(), {
+      targetUserId: 'user123',
+      grantPermissions: ['view_sales'],
+      requestorRole: 'admin',
+    });
+    expect(() =>
+      PermissionPreviewService.applyUpdate(creator(), {
+        targetUserId: 'user123',
+        grantPermissions: ['impersonate_user'],
+        explicitConfirmation: true,
+        requestorRole: 'admin',
+        expectedDiffDigest: report.digest,
+      }),
+    ).toThrow('Stale permission diff');
+  });
+
+  it('requires explicit confirmation for a narrow privileged grant', () => {
+    const grant: UpdateRequest = {
+      targetUserId: 'user123',
+      grantPermissions: ['impersonate_user'],
+      requestorRole: 'admin',
+    };
+    const report = PermissionPreviewService.previewUpdate(creator(), grant);
+    expect(report.isBroad).toBe(false);
+    expect(report.privilegedGrants).toEqual(['impersonate_user']);
+
+    expect(() =>
+      PermissionPreviewService.applyUpdate(creator(), { ...grant, expectedDiffDigest: report.digest }),
+    ).toThrow('Explicit confirmation is required for privileged grants.');
+  });
+
+  it('denies preview and apply when the requestor role is missing', () => {
+    const anonymous: UpdateRequest = { targetUserId: 'user123', grantPermissions: ['view_sales'] };
+    expect(() => PermissionPreviewService.previewUpdate(creator(), anonymous)).toThrow('Permission denied');
+    expect(() => PermissionPreviewService.applyUpdate(creator(), anonymous)).toThrow('Permission denied');
+  });
+
+  it('produces the same digest regardless of permission insertion order', () => {
+    const reordered = creator();
+    reordered.permissions = new Set([...ROLE_PERMISSIONS['creator']].reverse());
+    expect(PermissionPreviewService.previewUpdate(reordered, promoteToModerator).digest).toBe(
+      PermissionPreviewService.previewUpdate(creator(), promoteToModerator).digest,
+    );
   });
 });

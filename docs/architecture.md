@@ -120,15 +120,19 @@ expiry.
 ### Hand off a listing (ownership transfer)
 
 The Soroban `Prompt.creator` is immutable, so re-pointing who operates a
-listing is a two-phase, wallet-signature-gated OFF-chain handoff coordinated
+listing is a two-phase, wallet-session-gated OFF-chain handoff coordinated
 by the central server (routes under `/api/prompts/transfers/*`, see
-`server/src/routes/promptRoutes.ts`):
+`server/src/routes/promptRoutes.ts`). Every mutation carries a wallet session
+for the acting wallet and an `Idempotency-Key` (#1034):
 
-1. The current indexed owner requests a transfer to a recipient wallet.
-2. The recipient wallet signs an approval (or rejection).
+1. The current indexed owner requests a transfer to a recipient wallet. A
+   listing has at most one live pending request.
+2. The recipient wallet approves (or rejects).
 3. On approval the server re-points the indexed `Prompt.owner` to the
-   recipient's `User` record and records a `rejectionReason` if the handoff
-   later fails.
+   recipient's `User` record only if the requester still owns the listing
+   (compare-and-swap). Otherwise the request is cancelled with
+   `rejectionReason: "owner_changed"`. A transient failure returns the
+   request to `pending` so the recipient can retry before it expires.
 4. Requests expire after 72 hours and stay in a `pending`/`expired` state
    until the recipient responds or the requester cancels.
 

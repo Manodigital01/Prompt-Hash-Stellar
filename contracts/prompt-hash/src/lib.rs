@@ -8,6 +8,7 @@ mod contract;
 mod contract_tests;
 mod events;
 mod load_test;
+mod ownership_transfer_test;
 mod pagination;
 mod pagination_test;
 mod storage;

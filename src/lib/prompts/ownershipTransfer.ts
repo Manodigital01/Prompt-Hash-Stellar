@@ -1,9 +1,12 @@
 /**
- * Client for the OFF-CHAIN ownership transfer endpoints (#708).
+ * Client for the OFF-CHAIN ownership transfer endpoints (#708, #1034).
  *
  * The Soroban contract's `Prompt.creator` is immutable; transfers only
  * re-point the indexed `Prompt.owner` after the recipient approves (or
- * rejects) a wallet-signature-gated request. See docs/architecture.md.
+ * rejects) a pending request. Mutations carry a wallet session token
+ * (src/lib/auth/walletSession.ts) proving the acting wallet, plus an
+ * Idempotency-Key so a retried click is not applied twice.
+ * See docs/architecture.md.
  */
 
 export type OwnershipTransferStatus =
@@ -44,6 +47,24 @@ async function throwServerError(res: Response): Promise<never> {
   throw new Error(message);
 }
 
+async function postTransfer(
+  path: string,
+  sessionToken: string,
+  body: Record<string, unknown>,
+): Promise<OwnershipTransferDto> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${sessionToken}`,
+      "Idempotency-Key": crypto.randomUUID(),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return throwServerError(res);
+  return res.json();
+}
+
 export async function listOwnershipTransfers(
   walletAddress: string,
 ): Promise<OwnershipTransferList> {
@@ -54,53 +75,33 @@ export async function listOwnershipTransfers(
   return res.json();
 }
 
-export async function requestOwnershipTransfer(input: {
-  promptId: string;
-  fromWallet: string;
-  toWallet: string;
-  signature: string;
-}): Promise<OwnershipTransferDto> {
-  const res = await fetch("/api/prompts/transfers/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!res.ok) return throwServerError(res);
-  return res.json();
+export function requestOwnershipTransfer(
+  sessionToken: string,
+  input: { promptId: string; fromWallet: string; toWallet: string },
+): Promise<OwnershipTransferDto> {
+  return postTransfer("/api/prompts/transfers/request", sessionToken, input);
 }
 
-export async function respondOwnershipTransfer(
+export function respondOwnershipTransfer(
   transferId: string,
-  input: {
-    walletAddress: string;
-    decision: "approved" | "rejected";
-    signature: string;
-  },
+  sessionToken: string,
+  input: { walletAddress: string; decision: "approved" | "rejected" },
 ): Promise<OwnershipTransferDto> {
-  const res = await fetch(
+  return postTransfer(
     `/api/prompts/transfers/${encodeURIComponent(transferId)}/respond`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    },
+    sessionToken,
+    input,
   );
-  if (!res.ok) return throwServerError(res);
-  return res.json();
 }
 
-export async function cancelOwnershipTransfer(
+export function cancelOwnershipTransfer(
   transferId: string,
-  input: { walletAddress: string; signature: string },
+  sessionToken: string,
+  input: { walletAddress: string },
 ): Promise<OwnershipTransferDto> {
-  const res = await fetch(
+  return postTransfer(
     `/api/prompts/transfers/${encodeURIComponent(transferId)}/cancel`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    },
+    sessionToken,
+    input,
   );
-  if (!res.ok) return throwServerError(res);
-  return res.json();
 }
