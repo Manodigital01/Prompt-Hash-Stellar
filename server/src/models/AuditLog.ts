@@ -79,6 +79,12 @@ export const AUDIT_ACTIONS = [
   "step_up_locked",
   // duplicate-record merges (#902)
   "record_merge_committed",
+  // structured maintainer notes (#903)
+  "maintainer_note_created",
+  "maintainer_note_edited",
+  "maintainer_note_redacted",
+  "maintainer_note_archived",
+  "maintainer_note_accessed",
   // retention holds
   "retention_hold_created",
   "retention_hold_released",
