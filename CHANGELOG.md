@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Admin safeguards: step-up, merges, notes and escalation (Issues #901, #902, #903, #904)
+- Adaptive step-up verification (#901): a `step_up` decision now tracks the
+  subject's proof lifecycle. Verified proof expires after 5 minutes, a rejected
+  proof spends one of 3 attempts, and the budget's end locks the subject for 15
+  minutes. Denials return `STEP_UP_REQUIRED`, `STEP_UP_EXPIRED`,
+  `STEP_UP_FAILED` or `STEP_UP_LOCKED`. See `docs/operations/step-up-verification.md`.
+- Deterministic duplicate-record merge (#902): plan, resolve and execute
+  steps for duplicate prompts. Plans show denials, changes and conflicts, every
+  conflict needs an explicit choice, and a stale preview is refused. Merged
+  prompts redirect to the record that holds the content. Routes under
+  `/api/admin/record-merges`. See `docs/operations/record-merge.md`.
+- Structured maintainer notes (#903): typed notes with private, maintainer and
+  restricted visibility, versioned edits, redaction that keeps audit references,
+  per-type retention reporting, and audited reads. Routes under
+  `/api/admin/maintainer-notes`. See `docs/operations/maintainer-notes.md`.
+- Configurable failure escalation (#904): a validated, versioned policy per
+  severity sets when notices start, how often they repeat, and how many are sent.
+  Each notice is claimed before it is sent. Override the policy with
+  `ESCALATION_POLICY_JSON`. Routes under `/api/admin/escalations`. See
+  `docs/operations/failure-escalation.md`.
+
 #### Admin governance controls (Issues #909, #910, #911, #912)
 - Schema-driven config validation (#909): feature-flag PATCH bodies are checked
   against `FEATURE_FLAG_UPDATE_SCHEMA` before any write, returning 400 with field
