@@ -2,8 +2,10 @@
  * Express guard that scores a high-impact operation before its handler runs.
  *
  *   allow    → next()
- *   step_up  → 403 STEP_UP_REQUIRED unless the request carries a freshly
- *              signed wallet session for the acting wallet
+ *   step_up  → proceeds only with a verified, unexpired step-up record or a
+ *              freshly signed wallet session for the acting wallet. Otherwise
+ *              403 with STEP_UP_REQUIRED, STEP_UP_EXPIRED, STEP_UP_FAILED or
+ *              STEP_UP_LOCKED (#901). See services/stepUpVerification.ts
  *   review   → 202 REVIEW_REQUIRED with a review id; the operation is held
  *              until an admin approves it (one-shot approval)
  *   block    → 403 OPERATION_BLOCKED
@@ -33,6 +35,12 @@ import {
 import { hasFreshWalletSession } from "./walletSession";
 import { logger } from "../services/structuredLogger";
 import { recordAuditEvent } from "../services/auditTrail";
+import {
+  evaluateStepUp,
+  stepUpKey,
+  stepUpRemedy,
+  stepUpVerificationStore,
+} from "../services/stepUpVerification";
 
 export interface AbuseRiskGuardOptions {
   operation: HighImpactOperation;
@@ -52,6 +60,21 @@ function clientIp(req: Request): string | undefined {
   const forwarded = req.headers["x-forwarded-for"];
   const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();
   return first || req.socket?.remoteAddress || undefined;
+}
+
+function recordStepUpEvent(
+  ctx: OperationContext,
+  action: "step_up_verified" | "step_up_failed" | "step_up_locked",
+  result: "success" | "blocked",
+  detail: string,
+): void {
+  void recordAuditEvent({
+    action,
+    result,
+    promptId: ctx.target ?? null,
+    walletAddress: ctx.wallet,
+    reason: `op=${ctx.operation} ${detail}`,
+  });
 }
 
 /**
@@ -136,21 +159,49 @@ export function abuseRiskGuard(options: AbuseRiskGuardOptions) {
       case "allow":
         next();
         return;
-      case "step_up":
-        if (stepUpOk) {
+      case "step_up": {
+        const key = stepUpKey(ctx.wallet, ctx.operation, ctx.target);
+        const now = ctx.now ?? Date.now();
+        let evaluation = evaluateStepUp(stepUpVerificationStore.get(key), now);
+        if (evaluation.allowed) {
           next();
           return;
         }
+
+        // A locked subject is refused even with a valid proof (#901).
+        // Otherwise a fresh session verifies, and a presented but rejected
+        // proof spends one attempt.
+        const proofPresented = Boolean(req.headers.authorization);
+        if (evaluation.code !== "STEP_UP_LOCKED" && (stepUpOk || proofPresented)) {
+          const record = stepUpVerificationStore.applyProof(key, stepUpOk, now);
+          evaluation = evaluateStepUp(record, now);
+          if (evaluation.allowed) {
+            recordStepUpEvent(ctx, "step_up_verified", "success", "proof accepted");
+            next();
+            return;
+          }
+          recordStepUpEvent(
+            ctx,
+            evaluation.code === "STEP_UP_LOCKED" ? "step_up_locked" : "step_up_failed",
+            "blocked",
+            `code=${evaluation.code} attemptsRemaining=${evaluation.attemptsRemaining}`,
+          );
+        }
+
         res.status(403).json({
           error: "Additional verification required for this operation.",
-          code: "STEP_UP_REQUIRED",
+          code: evaluation.code,
           riskScore: assessment.score,
           summary: assessment.summary,
           reasons: explainReasons(assessment),
-          remedy:
-            "Sign a fresh wallet-session challenge (GET /api/wallet-session/challenge) and retry.",
+          attemptsRemaining: evaluation.attemptsRemaining,
+          ...(evaluation.allowed || evaluation.lockedUntil === undefined
+            ? {}
+            : { lockedUntil: new Date(evaluation.lockedUntil).toISOString() }),
+          remedy: stepUpRemedy(evaluation.code),
         });
         return;
+      }
       case "review":
         res.status(202).json({
           error: "This operation is held for review.",

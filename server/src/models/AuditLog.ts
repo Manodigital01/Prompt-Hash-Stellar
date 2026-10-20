@@ -73,6 +73,10 @@ export const AUDIT_ACTIONS = [
   "abuse_risk_decision",
   "abuse_risk_review_resolved",
   "abuse_risk_subject_reset",
+  // adaptive step-up verification (#901)
+  "step_up_verified",
+  "step_up_failed",
+  "step_up_locked",
   // retention holds
   "retention_hold_created",
   "retention_hold_released",
