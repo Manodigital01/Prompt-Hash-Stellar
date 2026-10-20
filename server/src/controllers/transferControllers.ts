@@ -10,12 +10,22 @@ import { logger } from "../services/structuredLogger";
 import { recordAccessOrOwnershipChange } from "../services/auditTrail";
 
 /**
- * Ownership transfer controllers (#708).
+ * Ownership transfer controllers (#708, hardened in #1034).
  *
- * Two-phase, wallet-signature-gated transfer of OFF-CHAIN listing ownership.
- * See prompts route section and docs/architecture.md for the boundary notes:
- * the on-chain `Prompt.creator` is immutable; this only re-points the indexed
+ * Two-phase transfer of OFF-CHAIN listing ownership. See prompts route
+ * section and docs/architecture.md for the boundary notes: the on-chain
+ * `Prompt.creator` is immutable; this only re-points the indexed
  * `Prompt.owner` used for analytics and payout attribution.
+ *
+ * Safety invariants (#1034):
+ *   - The acting wallet is proven by a wallet session (`requireWalletSession`
+ *     on the route), not by an unverified body field.
+ *   - A listing has at most one live pending transfer.
+ *   - Acceptance is a compare-and-swap on `Prompt.owner`: it only succeeds if
+ *     the requester still owns the listing, so a stale request can never move
+ *     ownership away from a later owner.
+ *   - A transient failure while applying an acceptance returns the request to
+ *     `pending` so the recipient can retry until it expires.
  */
 
 function isValidStellarAddress(address: string): boolean {
@@ -61,18 +71,12 @@ export const RequestOwnershipTransfer = async (
   res: Response,
 ): Promise<Response<any>> => {
   await connectDb();
-  const { promptId, fromWallet, toWallet, signature } = req.body;
+  const { promptId, fromWallet, toWallet } = req.body;
 
   if (!promptId || !fromWallet || !toWallet) {
     return res
       .status(400)
       .json({ error: "promptId, fromWallet, and toWallet are required." });
-  }
-
-  if (!signature) {
-    return res
-      .status(401)
-      .json({ error: "Wallet signature required for ownership transfers." });
   }
 
   if (!isValidStellarAddress(fromWallet) || !isValidStellarAddress(toWallet)) {
@@ -97,16 +101,22 @@ export const RequestOwnershipTransfer = async (
       .json({ error: "Only the current listing owner may request a transfer." });
   }
 
+  // Settle this listing's lapsed requests first so an expired one never
+  // blocks a new request; the promptId index keeps this O(k) for the listing.
+  const now = new Date();
+  await OwnershipTransfer.updateMany(
+    { promptId, status: "pending", expiresAt: { $lte: now } },
+    { $set: { status: "expired" } },
+  );
   const active = await OwnershipTransfer.findOne({
     promptId,
-    toWallet: toWallet.toLowerCase(),
     status: "pending",
-    expiresAt: { $gt: new Date() },
+    expiresAt: { $gt: now },
   });
   if (active) {
-    return res
-      .status(409)
-      .json({ error: "A pending transfer request already exists for this target." });
+    return res.status(409).json({
+      error: "A pending transfer already exists for this listing. Cancel it before requesting another.",
+    });
   }
 
   const prompt = await Prompt.findOne({ onChainId: promptId })
@@ -158,10 +168,12 @@ export const GetOwnershipTransfers = async (
 
   const address = String(walletAddress).toLowerCase();
 
+  // Only this wallet's rows: the read path must not sweep the whole collection.
   const expireOverdue = await OwnershipTransfer.updateMany(
     {
       status: "pending",
       expiresAt: { $lte: new Date() },
+      $or: [{ toWallet: address }, { fromWallet: address }],
     },
     { $set: { status: "expired" } },
   );
@@ -197,12 +209,12 @@ export const RespondOwnershipTransfer = async (
 ): Promise<Response<any>> => {
   await connectDb();
   const { transferId } = req.params;
-  const { walletAddress, decision, signature } = req.body;
+  const { walletAddress, decision } = req.body;
 
-  if (!walletAddress || !decision || !signature) {
+  if (!walletAddress || !decision) {
     return res
       .status(400)
-      .json({ error: "walletAddress, decision, and signature are required." });
+      .json({ error: "walletAddress and decision are required." });
   }
 
   if (decision !== "approved" && decision !== "rejected") {
@@ -246,8 +258,9 @@ export const RespondOwnershipTransfer = async (
   }
 
   if (decision === "approved") {
+    // The expiry bound closes the window between the check above and the claim.
     const claimed = await OwnershipTransfer.updateOne(
-      { _id: transfer._id, status: "pending" },
+      { _id: transfer._id, status: "pending", expiresAt: { $gt: new Date() } },
       {
         $set: {
           status: "approved",
@@ -260,46 +273,65 @@ export const RespondOwnershipTransfer = async (
       return res.status(409).json({ error: "Transfer was already decided." });
     }
 
+    let ownerMoved: boolean;
     try {
+      const previousOwner = await User.findOne({ walletAddress: transfer.fromWallet });
       const recipientId = await userIdForWallet(walletAddress);
-      const updatedPrompt = await Prompt.findOneAndUpdate(
-        { onChainId: transfer.promptId },
-        { $set: { owner: recipientId } },
-        { new: true },
-      ).lean()
-        .exec();
-      if (!updatedPrompt) {
-        logger.error("Ownership transfer approved but prompt missing", {
-          action: "ownershipTransferApprovedMissingPrompt",
-          promptId: transfer.promptId,
-        });
-        return res.status(404).json({ error: "Prompt not found." });
-      }
-
-      await recordAccessOrOwnershipChange({
-        action: "ownership_transfer_accepted",
-        actor: walletAddress.toLowerCase(),
-        target: transfer.promptId,
-        targetType: "prompt",
-        promptId: transfer.promptId,
-        walletAddress,
-        beforeState: { previousOwner: transfer.fromWallet },
-        afterState: { newOwner: walletAddress.toLowerCase(), transferId: transfer._id.toString() },
-        reason: "Ownership transfer accepted by recipient",
-      });
+      // Compare-and-swap: only re-point the listing if the requester still owns it.
+      const updatedPrompt = previousOwner
+        ? await Prompt.findOneAndUpdate(
+            { onChainId: transfer.promptId, owner: previousOwner._id },
+            { $set: { owner: recipientId } },
+            { new: true },
+          )
+            .lean()
+            .exec()
+        : null;
+      ownerMoved = Boolean(updatedPrompt);
     } catch (err) {
-      // Roll the approval back so the recipient can retry cleanly.
+      // Transient failure: return the request to pending so the recipient can
+      // retry before it expires. Nothing was applied to the listing.
       await OwnershipTransfer.updateOne(
         { _id: transfer._id, status: "approved" },
-        { $set: { status: "rejected", decidedAt: new Date(), rejectionReason: "approval failed" } },
+        { $set: { status: "pending", decidedAt: null, decidedBy: null } },
       );
       logger.error("Ownership transfer approval failed", {
         action: "ownershipTransferApprovalFailed",
         promptId: transfer.promptId,
         error: err,
       });
-      return res.status(500).json({ error: "Failed to apply ownership transfer." });
+      return res
+        .status(500)
+        .json({ error: "Failed to apply ownership transfer. Please retry." });
     }
+
+    if (!ownerMoved) {
+      // The listing changed hands (or was removed) after the request was made.
+      await OwnershipTransfer.updateOne(
+        { _id: transfer._id, status: "approved" },
+        { $set: { status: "cancelled", rejectionReason: "owner_changed" } },
+      );
+      logger.warn("Stale ownership transfer cancelled at acceptance", {
+        action: "ownershipTransferStale",
+        transferId: transfer._id.toString(),
+        promptId: transfer.promptId,
+      });
+      return res.status(409).json({
+        error: "The listing owner changed since this transfer was requested. Ask the current owner for a new transfer.",
+      });
+    }
+
+    await recordAccessOrOwnershipChange({
+      action: "ownership_transfer_accepted",
+      actor: walletAddress.toLowerCase(),
+      target: transfer.promptId,
+      targetType: "prompt",
+      promptId: transfer.promptId,
+      walletAddress,
+      beforeState: { previousOwner: transfer.fromWallet },
+      afterState: { newOwner: walletAddress.toLowerCase(), transferId: transfer._id.toString() },
+      reason: "Ownership transfer accepted by recipient",
+    });
   } else {
     const claimed = await OwnershipTransfer.updateOne(
       { _id: transfer._id, status: "pending" },
@@ -346,12 +378,10 @@ export const CancelOwnershipTransfer = async (
 ): Promise<Response<any>> => {
   await connectDb();
   const { transferId } = req.params;
-  const { walletAddress, signature } = req.body;
+  const { walletAddress } = req.body;
 
-  if (!walletAddress || !signature) {
-    return res
-      .status(400)
-      .json({ error: "walletAddress and signature are required." });
+  if (!walletAddress) {
+    return res.status(400).json({ error: "walletAddress is required." });
   }
 
   const claimed = await OwnershipTransfer.updateOne(

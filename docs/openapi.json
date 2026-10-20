@@ -1459,7 +1459,7 @@
           "Prompts"
         ],
         "summary": "Cancel a pending ownership transfer",
-        "description": "Cancels a transfer previously requested by the caller. Requires a wallet signature.",
+        "description": "Cancels a transfer previously requested by the caller. Requires a wallet session for `walletAddress` (`Authorization: Bearer`) and an `Idempotency-Key` header (#1034).",
         "operationId": "cancelOwnershipTransfer",
         "parameters": [
           {
@@ -1488,7 +1488,7 @@
           "Prompts"
         ],
         "summary": "Approve or reject an ownership transfer",
-        "description": "Recipient decision for a pending ownership transfer. Approval re-points the indexed Prompt.owner, affecting analytics and payout attribution. Requires a wallet signature.",
+        "description": "Recipient decision for a pending ownership transfer. Approval re-points the indexed Prompt.owner, affecting analytics and payout attribution, only if the requester still owns the listing (409 and the request is cancelled otherwise). Requires a wallet session for `walletAddress` (`Authorization: Bearer`) and an `Idempotency-Key` header (#1034).",
         "operationId": "respondOwnershipTransfer",
         "parameters": [
           {
@@ -1508,19 +1508,20 @@
               "schema": {
                 "type": "object",
                 "required": [
+                  "walletAddress",
                   "decision"
                 ],
                 "properties": {
+                  "walletAddress": {
+                    "type": "string",
+                    "description": "Recipient wallet; must match the wallet session."
+                  },
                   "decision": {
                     "type": "string",
                     "enum": [
-                      "approve",
-                      "reject"
+                      "approved",
+                      "rejected"
                     ]
-                  },
-                  "signature": {
-                    "type": "string",
-                    "description": "Recipient wallet signature."
                   }
                 }
               }
@@ -1569,7 +1570,7 @@
           "Prompts"
         ],
         "summary": "Request an ownership transfer",
-        "description": "Starts the off-chain two-phase ownership handoff (#708). The current owner requests a transfer of an indexed prompt; the recipient approves or rejects. Requires a wallet signature.",
+        "description": "Starts the off-chain two-phase ownership handoff (#708). The current owner requests a transfer of an indexed prompt; the recipient approves or rejects. A listing has at most one live pending transfer (409 otherwise). Requires a wallet session for `fromWallet` (`Authorization: Bearer`) and an `Idempotency-Key` header (#1034).",
         "operationId": "requestOwnershipTransfer",
         "requestBody": {
           "required": true,
@@ -1586,7 +1587,10 @@
             "description": "Transfer request created."
           },
           "400": {
-            "description": "Invalid request or signature."
+            "description": "Invalid request."
+          },
+          "401": {
+            "description": "Missing or foreign wallet session."
           }
         }
       }
@@ -3991,20 +3995,21 @@
       "type": "object",
       "required": [
         "promptId",
-        "recipientWallet"
+        "fromWallet",
+        "toWallet"
       ],
       "properties": {
         "promptId": {
           "type": "string",
           "description": "Indexed prompt to hand off."
         },
-        "recipientWallet": {
+        "fromWallet": {
+          "type": "string",
+          "description": "Current owner wallet; must match the wallet session."
+        },
+        "toWallet": {
           "type": "string",
           "description": "Recipient Stellar wallet address."
-        },
-        "signature": {
-          "type": "string",
-          "description": "Current owner wallet signature."
         }
       }
     },

@@ -26,6 +26,7 @@ import {
   type OwnershipTransferDto,
   type OwnershipTransferStatus,
 } from "@/lib/prompts/ownershipTransfer";
+import { getWalletSession } from "@/lib/auth/walletSession";
 
 interface TransferablePrompt {
   id: bigint;
@@ -91,12 +92,11 @@ export function OwnershipTransferPanel({
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["ownership-transfers"] });
 
-  const signedMessage = async (message: string): Promise<string> => {
+  const sessionToken = (): Promise<string> => {
     if (!signMessage) {
       throw new Error("Connect a wallet with message signing to continue.");
     }
-    const result = await signMessage(message);
-    return typeof result === "string" ? result : (result.signedMessage ?? "");
+    return getWalletSession(walletAddress, signMessage);
   };
 
   const handleRequest = async () => {
@@ -117,16 +117,10 @@ export function OwnershipTransferPanel({
     setActionError(null);
     setBusy("request");
     try {
-      const message = `prompt-hash transfer request:${selectedPromptId}:${toWallet}`;
-      const signature = await signedMessage(message);
-      if (!signature) {
-        throw new Error("The wallet did not return a signature.");
-      }
-      await requestOwnershipTransfer({
+      await requestOwnershipTransfer(await sessionToken(), {
         promptId: selectedPromptId,
         fromWallet: walletAddress,
         toWallet,
-        signature,
       });
       setSelectedPromptId("");
       setRecipientWallet("");
@@ -147,15 +141,9 @@ export function OwnershipTransferPanel({
     setActionError(null);
     setBusy(`${transfer.id}-${decision}`);
     try {
-      const message = `prompt-hash transfer ${decision}:${transfer.id}`;
-      const signature = await signedMessage(message);
-      if (!signature) {
-        throw new Error("The wallet did not return a signature.");
-      }
-      await respondOwnershipTransfer(transfer.id, {
+      await respondOwnershipTransfer(transfer.id, await sessionToken(), {
         walletAddress,
         decision,
-        signature,
       });
       await refresh();
     } catch (error) {
@@ -171,12 +159,9 @@ export function OwnershipTransferPanel({
     setActionError(null);
     setBusy(`${transfer.id}-cancel`);
     try {
-      const message = `prompt-hash transfer cancel:${transfer.id}`;
-      const signature = await signedMessage(message);
-      if (!signature) {
-        throw new Error("The wallet did not return a signature.");
-      }
-      await cancelOwnershipTransfer(transfer.id, { walletAddress, signature });
+      await cancelOwnershipTransfer(transfer.id, await sessionToken(), {
+        walletAddress,
+      });
       await refresh();
     } catch (error) {
       setActionError(

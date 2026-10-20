@@ -1,5 +1,11 @@
 import { AuthContext, ROLE_PERMISSIONS, UserRole } from '../middleware/rbac';
 import { RBACService } from './rbacService';
+import {
+  assertReviewedDiff,
+  diffDigest,
+  diffSets,
+  isPrivilegedPermission,
+} from './permissionDiff';
 
 export interface PermissionDiff {
   added: string[];
@@ -8,6 +14,10 @@ export interface PermissionDiff {
   affectedActors: string[];
   scopes: string[];
   actions: string[];
+  /** Granted permissions outside the self-service baseline (#1036). */
+  privilegedGrants: string[];
+  /** Binds the report to its before/after state; applyUpdate requires it (#1036). */
+  digest: string;
 }
 
 export interface UpdateRequest {
@@ -20,6 +30,7 @@ export interface UpdateRequest {
   currentPolicyVersion?: string; 
   explicitConfirmation?: boolean; // Required if isBroad is true
   requestorRole?: UserRole; // Who is making the request
+  expectedDiffDigest?: string; // Digest of the reviewed preview (#1036)
 }
 
 export class PermissionPreviewService {
@@ -31,20 +42,7 @@ export class PermissionPreviewService {
     newPermissions: Set<string>,
     updateReq: UpdateRequest
   ): PermissionDiff {
-    const added: string[] = [];
-    const removed: string[] = [];
-
-    newPermissions.forEach((p) => {
-      if (!currentPermissions.has(p)) {
-        added.push(p);
-      }
-    });
-
-    currentPermissions.forEach((p) => {
-      if (!newPermissions.has(p)) {
-        removed.push(p);
-      }
-    });
+    const { added, removed } = diffSets(currentPermissions, newPermissions);
 
     const affectedActors = updateReq.targetUserId
       ? [updateReq.targetUserId]
@@ -56,15 +54,34 @@ export class PermissionPreviewService {
     // 1. Affects a whole role or global (not just a single user)
     // 2. Modifies more than 2 permissions at once
     const isBroad = (!updateReq.targetUserId) || (added.length + removed.length > 2);
+    const scopes = updateReq.targetRole ? [updateReq.targetRole] : ['user-specific'];
 
     return {
       added,
       removed,
       isBroad,
       affectedActors,
-      scopes: updateReq.targetRole ? [updateReq.targetRole] : ['user-specific'],
+      scopes,
       actions: added.map((a) => `Grant ${a}`).concat(removed.map((r) => `Revoke ${r}`)),
+      privilegedGrants: added.filter(isPrivilegedPermission),
+      // Binds the full before/after state, not just the delta, so any
+      // concurrent change to the target invalidates a reviewed report.
+      digest: diffDigest({
+        affectedActors,
+        scopes,
+        newRole: updateReq.newRole ?? null,
+        before: [...currentPermissions].sort(),
+        after: [...newPermissions].sort(),
+      }),
     };
+  }
+
+  /**
+   * Returns the permission-diff report for an update without applying it
+   * (#1036). Apply with `expectedDiffDigest: report.digest`.
+   */
+  static previewUpdate(currentContext: AuthContext, updateReq: UpdateRequest): PermissionDiff {
+    return this.plan(currentContext, updateReq).diff;
   }
 
   /**
@@ -74,8 +91,38 @@ export class PermissionPreviewService {
     currentContext: AuthContext,
     updateReq: UpdateRequest
   ): AuthContext {
-    // 1. Check for denied actor (only admins can apply broad changes usually, but let's check requestorRole)
-    if (updateReq.requestorRole && updateReq.requestorRole !== 'admin') {
+    const { diff, newPermissions } = this.plan(currentContext, updateReq);
+
+    // 4. Require explicit confirmation for broad changes and privilege escalation
+    if (diff.isBroad && !updateReq.explicitConfirmation) {
+      throw new Error('Explicit confirmation is required for broad changes.');
+    }
+    if (diff.privilegedGrants.length > 0 && !updateReq.explicitConfirmation) {
+      throw new Error('Explicit confirmation is required for privileged grants.');
+    }
+
+    // 5. If it's a no-op, just return the current context
+    if (diff.added.length === 0 && diff.removed.length === 0) {
+      return currentContext;
+    }
+
+    // 6. The caller must have reviewed exactly this diff (#1036)
+    assertReviewedDiff(updateReq.expectedDiffDigest, diff.digest);
+
+    return {
+      ...currentContext,
+      role: updateReq.newRole || currentContext.role,
+      permissions: newPermissions,
+    };
+  }
+
+  /** Shared by preview and apply so both evaluate the identical change. */
+  private static plan(
+    currentContext: AuthContext,
+    updateReq: UpdateRequest
+  ): { diff: PermissionDiff; newPermissions: Set<string> } {
+    // 1. Fail closed: only an identified admin may preview or change permissions
+    if (updateReq.requestorRole !== 'admin') {
       throw new Error('Permission denied: Only admins can update permissions');
     }
 
@@ -105,22 +152,9 @@ export class PermissionPreviewService {
       updateReq.revokePermissions.forEach((p) => newPermissions.delete(p));
     }
 
-    const diff = this.computeDiff(currentPermissions, newPermissions, updateReq);
-
-    // 4. Require explicit confirmation for broad changes
-    if (diff.isBroad && !updateReq.explicitConfirmation) {
-      throw new Error('Explicit confirmation is required for broad changes.');
-    }
-
-    // 5. If it's a no-op, just return the current context
-    if (diff.added.length === 0 && diff.removed.length === 0) {
-      return currentContext;
-    }
-
     return {
-      ...currentContext,
-      role: updateReq.newRole || currentContext.role,
-      permissions: newPermissions,
+      diff: this.computeDiff(currentPermissions, newPermissions, updateReq),
+      newPermissions,
     };
   }
 }

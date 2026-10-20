@@ -29,6 +29,13 @@ import {
   RespondOwnershipTransfer,
   CancelOwnershipTransfer,
 } from "../controllers/transferControllers";
+import {
+  ResolvePromptPermalink,
+  RenamePromptRecord,
+  ArchivePromptRecord,
+  RestorePromptRecord,
+  RestrictPromptRecord,
+} from "../controllers/permalinkControllers.js";
 import { GetModerationQueue, OverrideModeration } from "../services/moderationService";
 import {
   GetLicenseTemplates,
@@ -42,6 +49,7 @@ import { reportLimiter, publishLimiter } from "../middleware/rateLimiter";
 import { enforcePolicyLimit } from "../middleware/policyLimitMiddleware";
 import { requireIdempotency } from "../middleware/idempotency";
 import { abuseRiskGuard } from "../middleware/abuseRiskGuard";
+import { requireWalletSession } from "../middleware/walletSession";
 
 export const promptRouter = express.Router();
 
@@ -190,10 +198,15 @@ const transferRiskGuard = abuseRiskGuard({
       : null;
   },
 });
-promptRouter.post("/transfers/request", transferRiskGuard, requireIdempotency, RequestOwnershipTransfer);
+// #1034: the acting wallet must hold a wallet session; it runs before risk
+// scoring and idempotency so unauthenticated calls never reserve a key.
+const transferSession = requireWalletSession(
+  (req) => req.body?.fromWallet ?? req.body?.walletAddress,
+);
+promptRouter.post("/transfers/request", transferSession, transferRiskGuard, requireIdempotency, RequestOwnershipTransfer);
 promptRouter.get("/transfers/:walletAddress", GetOwnershipTransfers);
-promptRouter.post("/transfers/:transferId/respond", transferRiskGuard, requireIdempotency, RespondOwnershipTransfer);
-promptRouter.post("/transfers/:transferId/cancel", transferRiskGuard, requireIdempotency, CancelOwnershipTransfer);
+promptRouter.post("/transfers/:transferId/respond", transferSession, transferRiskGuard, requireIdempotency, RespondOwnershipTransfer);
+promptRouter.post("/transfers/:transferId/cancel", transferSession, transferRiskGuard, requireIdempotency, CancelOwnershipTransfer);
 
 // ── User Preference (non-authoritative, wallet-signature required) ────────────
 promptRouter.post("/buyer/save", SavePrompt);
