@@ -46,6 +46,7 @@ import { healthRouter } from "./routes/healthRoutes";
 import { jobRouter } from "./routes/jobRoutes";
 import { allowListRouter } from "./routes/allowListRoutes";
 import { projectionReplayRouter } from "./routes/projectionReplayRoutes";
+import { ownershipDisputeAdminRouter } from "./routes/ownershipDisputeRoutes";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -110,6 +111,7 @@ app.use("/api/admin/dr", drRouter);
 app.use("/api/admin/policy-limits", policyLimitRouter);
 app.use("/api/admin/allow-list", allowListRouter); // #1025
 app.use("/api/admin/projections", projectionReplayRouter); // #1024
+app.use("/api/admin/ownership-disputes", ownershipDisputeAdminRouter); // #907
 app.use("/api/recovery", operationRecoveryRouter);
 app.use("/api/receipts", receiptRouter);
 app.use("/api/admin/abuse-risk", abuseRiskRouter);
