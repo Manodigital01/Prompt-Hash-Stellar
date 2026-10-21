@@ -46,7 +46,59 @@ export type SecurityEventType =
   | "permission_revocation"
   | "suspicious_activity"
   | "explicit_logout_all"
-  | "global_emergency_cutoff";
+  | "global_emergency_cutoff"
+  | "credential_change"
+  | "role_change"
+  | "account_recovery";
+
+/**
+ * Which security events end sessions, and what the user is told (#908).
+ *
+ * `subject` events end the sessions of one account (`targetSubject` is that
+ * account), leaving every other session usable. `global` events end all
+ * sessions and must target "*". Messages are user-safe: they say what happened
+ * and what to do next, and never repeat the internal reason.
+ */
+export const SECURITY_EVENT_POLICY: Record<SecurityEventType, { scope: "subject" | "global"; userMessage: string }> = {
+  wallet_compromise: {
+    scope: "subject",
+    userMessage: "We ended your wallet session to protect your account. Reconnect your wallet to continue.",
+  },
+  admin_key_rotation: {
+    scope: "subject",
+    userMessage: "Operator sessions ended after a key rotation. Sign in again to continue.",
+  },
+  permission_revocation: {
+    scope: "subject",
+    userMessage: "Your permissions changed, so your session ended. Sign in again to see your current access.",
+  },
+  suspicious_activity: {
+    scope: "subject",
+    userMessage: "We noticed unusual activity, so your session ended. Sign in again to continue.",
+  },
+  explicit_logout_all: {
+    scope: "subject",
+    userMessage: "You signed out of all sessions. Sign in again to continue.",
+  },
+  global_emergency_cutoff: {
+    scope: "global",
+    userMessage: "Sessions were refreshed for a security update. Sign in again to continue.",
+  },
+  credential_change: {
+    scope: "subject",
+    userMessage: "Your password or key was changed, so your sessions ended. Sign in with the new credentials.",
+  },
+  role_change: {
+    scope: "subject",
+    userMessage: "Your access level changed, so your session ended. Sign in again to refresh your permissions.",
+  },
+  account_recovery: {
+    scope: "subject",
+    userMessage: "Account recovery was completed, so earlier sessions ended. Sign in again to continue.",
+  },
+};
+
+const NONCE_REVOKED_MESSAGE = "This session was ended for security reasons. Sign in again to continue.";
 
 export interface SecurityRevocationEvent {
   eventId: string;
@@ -66,7 +118,10 @@ export interface RevocationStatus {
     | "global_security_event"
     | "subject_revoked_by_security_event"
     | "token_nonce_revoked";
+  /** Internal detail for operators. Never send this to end users. */
   reason?: string;
+  /** User-safe explanation and next step, from SECURITY_EVENT_POLICY. */
+  message?: string;
   revocationEventId?: string;
 }
 
@@ -112,13 +167,14 @@ export function normalizeSubject(subject: string): string {
 export class SessionRevocationRegistry {
   private subjectCutoffs = new Map<
     string,
-    { revokedBefore: number; eventId: string; reason: string; createdAt: number }
+    { revokedBefore: number; eventId: string; reason: string; createdAt: number; eventType: SecurityEventType }
   >();
   private revokedNonces = new Map<string, { expiresAt: number; eventId: string }>();
   private globalCutoff: {
     revokedBefore: number;
     eventId: string;
     reason: string;
+    eventType: SecurityEventType;
   } | null = null;
   private auditLog: SecurityRevocationEvent[] = [];
   readonly retentionMs: number;
@@ -186,6 +242,7 @@ export class SessionRevocationRegistry {
         revokedBefore: Math.max(prevCutoff, cutoff),
         eventId: eventRecord.eventId,
         reason: eventRecord.reason,
+        eventType: eventRecord.type,
       };
     } else {
       const existing = this.subjectCutoffs.get(normSubject);
@@ -195,6 +252,7 @@ export class SessionRevocationRegistry {
         eventId: eventRecord.eventId,
         reason: eventRecord.reason,
         createdAt: now,
+        eventType: eventRecord.type,
       });
     }
 
@@ -234,6 +292,7 @@ export class SessionRevocationRegistry {
         revoked: true,
         code: "global_security_event",
         reason: this.globalCutoff.reason,
+        message: SECURITY_EVENT_POLICY[this.globalCutoff.eventType].userMessage,
         revocationEventId: this.globalCutoff.eventId,
       };
     }
@@ -246,6 +305,7 @@ export class SessionRevocationRegistry {
         revoked: true,
         code: "subject_revoked_by_security_event",
         reason: subjectEntry.reason,
+        message: SECURITY_EVENT_POLICY[subjectEntry.eventType].userMessage,
         revocationEventId: subjectEntry.eventId,
       };
     }
@@ -258,6 +318,7 @@ export class SessionRevocationRegistry {
           revoked: true,
           code: "token_nonce_revoked",
           reason: "Token nonce explicitly revoked.",
+          message: NONCE_REVOKED_MESSAGE,
           revocationEventId: nonceEntry.eventId,
         };
       }
@@ -331,6 +392,43 @@ export class SessionRevocationRegistry {
     this.globalCutoff = null;
     this.auditLog = [];
   }
+}
+
+/**
+ * Ends sessions for a security event, using the scope from SECURITY_EVENT_POLICY
+ * (#908). Subject events cut off one account; global events must target "*".
+ * Callers that change credentials, roles or recovery state should call this in
+ * the same request, so no session survives the change.
+ */
+export function invalidateSessionsForSecurityEvent(
+  registry: SessionRevocationRegistry,
+  input: {
+    type: SecurityEventType;
+    subject: string;
+    reason: string;
+    actor: RevocationActor;
+    metadata?: Record<string, unknown>;
+  },
+  now = Date.now(),
+): SecurityRevocationEvent {
+  const policy = SECURITY_EVENT_POLICY[input.type];
+  const isGlobalTarget = input.subject.trim() === "*";
+  if (policy.scope === "global" && !isGlobalTarget) {
+    throw new SessionRevocationError("invalid_subject", `${input.type} applies platform-wide and must target "*".`);
+  }
+  if (policy.scope === "subject" && isGlobalTarget) {
+    throw new SessionRevocationError("invalid_subject", `${input.type} must target a single account, not "*".`);
+  }
+  return registry.recordSecurityEvent(
+    {
+      type: input.type,
+      targetSubject: input.subject,
+      reason: input.reason,
+      actor: input.actor,
+      metadata: input.metadata,
+    },
+    now,
+  );
 }
 
 /** Global shared instance */

@@ -26,6 +26,7 @@
 
 import { randomUUID } from "crypto";
 import { ProjectionDocument, ProjectionPointer, ProjectionRun } from "../models/ProjectionRun";
+import { EventJournal } from "../models/EventJournal";
 import { readJournalPage, type JournalCursor } from "./eventJournal";
 import { logger, recordAuditEvent } from "./auditTrail";
 
@@ -55,7 +56,8 @@ export class ReplayError extends Error {
       | "run_not_found"
       | "run_not_claimable"
       | "run_not_activatable"
-      | "nothing_to_roll_back",
+      | "nothing_to_roll_back"
+      | "checkpoint_event_missing",
     message: string,
   ) {
     super(message);
@@ -175,6 +177,51 @@ export function classifyEvent(projection: ProjectionDefinition<any>, event: Repl
   return versions.includes(event.eventVersion) ? "applied" : "unsupported";
 }
 
+export type ParsedReplayEvent =
+  | { ok: true; event: ReplayEvent }
+  | { ok: false; reason: string; checkpointable: boolean };
+
+/**
+ * Checks a journal row's shape before any reducer sees it. `checkpointable`
+ * is false when the row's identity (`eventId`, `ledger`) is unusable: the
+ * replay cursor cannot move past such a row, so no mode may skip it.
+ */
+export function parseReplayEvent(raw: any): ParsedReplayEvent {
+  if (!raw || typeof raw !== "object") {
+    return { ok: false, reason: "row is not an object", checkpointable: false };
+  }
+  if (typeof raw.eventId !== "string" || raw.eventId.length === 0) {
+    return { ok: false, reason: "eventId must be a non-empty string", checkpointable: false };
+  }
+  if (!Number.isSafeInteger(raw.ledger) || raw.ledger < 0) {
+    return { ok: false, reason: "ledger must be a non-negative integer", checkpointable: false };
+  }
+  if (typeof raw.eventType !== "string" || raw.eventType.length === 0) {
+    return { ok: false, reason: "eventType must be a non-empty string", checkpointable: true };
+  }
+  if (!Number.isSafeInteger(raw.eventVersion) || raw.eventVersion < 1) {
+    return { ok: false, reason: "eventVersion must be a positive integer", checkpointable: true };
+  }
+  if (!raw.payload || typeof raw.payload !== "object" || Array.isArray(raw.payload)) {
+    return { ok: false, reason: "payload must be an object", checkpointable: true };
+  }
+  return {
+    ok: true,
+    event: {
+      eventId: raw.eventId,
+      ledger: raw.ledger,
+      eventType: raw.eventType,
+      eventVersion: raw.eventVersion,
+      payload: raw.payload,
+    },
+  };
+}
+
+function applyFailure(event: ReplayEvent, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return `apply_failed: ${event.eventType} v${event.eventVersion} at ledger ${event.ledger} (${event.eventId}): ${message}`;
+}
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -182,6 +229,7 @@ export function classifyEvent(projection: ProjectionDefinition<any>, event: Repl
 const DEFAULT_BATCH_SIZE = 500;
 const LEASE_MS = 60_000;
 const MAX_UNSUPPORTED_SAMPLES = 20;
+const MAX_MALFORMED_SAMPLES = 20;
 
 export interface StartReplayInput {
   projection: string;
@@ -266,29 +314,54 @@ export async function runReplay(
   // Dry runs keep rows in memory, so they cannot resume mid-way: restart.
   const dryRun = claimed.mode === "dry_run";
   let cursor: JournalCursor = dryRun ? { ledger: 0, eventId: "" } : { ...claimed.checkpoint };
-  const counts = dryRun ? { applied: 0, ignored: 0, unsupported: 0 } : { ...claimed.counts };
+  const counts = { applied: 0, ignored: 0, unsupported: 0, malformed: 0, ...(dryRun ? {} : claimed.counts) };
   const samples: unknown[] = dryRun ? [] : [...(claimed.unsupportedSamples ?? [])];
+  const malformedSamples: unknown[] = dryRun ? [] : [...(claimed.malformedSamples ?? [])];
   const memory = new Map<string, StoredRow | null>();
 
   try {
+    // The checkpoint names the last event already applied. If that event has
+    // left the journal, resuming would skip or re-apply history silently, so
+    // refuse and let an operator start a fresh run instead.
+    if (!dryRun && cursor.eventId) {
+      const checkpointPresent = await EventJournal.exists({ eventId: cursor.eventId, ledger: cursor.ledger });
+      if (!checkpointPresent) {
+        throw new ReplayError(
+          "checkpoint_event_missing",
+          `checkpoint_event_missing: event ${cursor.eventId} at ledger ${cursor.ledger} is no longer in the journal; start a new run`,
+        );
+      }
+    }
+
     for (;;) {
       const page = await readJournalPage(cursor, batchSize);
       if (page.length === 0) break;
 
       const dirty = new Map<string, StoredRow | null>();
-      const pageCounts = { applied: 0, ignored: 0, unsupported: 0 };
+      const pageCounts = { applied: 0, ignored: 0, unsupported: 0, malformed: 0 };
       const pageSamples: unknown[] = [];
+      const pageMalformed: unknown[] = [];
       let pageCursor = cursor;
       let stop: string | null = null;
 
       for (const raw of page) {
-        const event: ReplayEvent = {
-          eventId: raw.eventId,
-          ledger: raw.ledger,
-          eventType: raw.eventType,
-          eventVersion: raw.eventVersion,
-          payload: raw.payload ?? {},
-        };
+        const parsed = parseReplayEvent(raw);
+        if (!parsed.ok) {
+          // Lenient mode may skip a malformed row, but only one whose identity
+          // lets the checkpoint move past it; every other malformed row stops.
+          if (!parsed.checkpointable || claimed.strict) {
+            stop = `malformed_event: ${parsed.reason} (eventId ${JSON.stringify(raw?.eventId ?? null)}, ledger ${JSON.stringify(raw?.ledger ?? null)})`;
+            break;
+          }
+          pageCounts.malformed += 1;
+          if (malformedSamples.length + pageMalformed.length < MAX_MALFORMED_SAMPLES) {
+            pageMalformed.push({ eventId: raw.eventId, ledger: raw.ledger, reason: parsed.reason });
+          }
+          pageCursor = { ledger: raw.ledger, eventId: raw.eventId };
+          continue;
+        }
+
+        const event = parsed.event;
         const disposition = classifyEvent(projection, event);
 
         if (disposition === "unsupported") {
@@ -303,7 +376,15 @@ export async function runReplay(
         } else if (disposition === "ignored") {
           pageCounts.ignored += 1;
         } else {
-          const key = projection.keyOf(event);
+          // A reducer bug or an unexpected payload stops the run at this event
+          // (never half-applied); the checkpoint stays before it.
+          let key: string | null;
+          try {
+            key = projection.keyOf(event);
+          } catch (err) {
+            stop = applyFailure(event, err);
+            break;
+          }
           if (key !== null) {
             let row = dirty.has(key) ? dirty.get(key)! : memory.get(key);
             if (row === undefined && !dryRun) {
@@ -314,7 +395,13 @@ export async function runReplay(
             // A row already past this event was written before a crash; the
             // page is being re-processed and the event must not apply twice.
             if (isAfter(event, row)) {
-              const next = projection.apply(row ? (row.data as any) : null, event);
+              let next: Record<string, unknown> | null;
+              try {
+                next = projection.apply(row ? (row.data as any) : null, event);
+              } catch (err) {
+                stop = applyFailure(event, err);
+                break;
+              }
               dirty.set(key, next === null ? null : { data: next, lastLedger: event.ledger, lastEventId: event.eventId });
             }
           }
@@ -345,7 +432,9 @@ export async function runReplay(
       counts.applied += pageCounts.applied;
       counts.ignored += pageCounts.ignored;
       counts.unsupported += pageCounts.unsupported;
+      counts.malformed += pageCounts.malformed;
       samples.push(...pageSamples);
+      malformedSamples.push(...pageMalformed);
       cursor = pageCursor;
 
       await ProjectionRun.updateOne(
@@ -355,6 +444,7 @@ export async function runReplay(
             checkpoint: cursor,
             counts,
             unsupportedSamples: samples,
+            malformedSamples,
             leaseExpiresAt: new Date(now().getTime() + LEASE_MS),
           },
         },
@@ -378,7 +468,7 @@ export async function runReplay(
           completedAt: now(),
           leaseExpiresAt: null,
           documents,
-          ...(dryRun ? { checkpoint: cursor, counts, unsupportedSamples: samples } : {}),
+          ...(dryRun ? { checkpoint: cursor, counts, unsupportedSamples: samples, malformedSamples } : {}),
         },
       },
     );
@@ -406,6 +496,12 @@ export async function activateRun(runId: string, actor: string) {
     throw new ReplayError(
       "run_not_activatable",
       `Run skipped ${run.counts.unsupported} unsupported event(s); upgrade the projection and rebuild before activating.`,
+    );
+  }
+  if (run.counts?.malformed > 0) {
+    throw new ReplayError(
+      "run_not_activatable",
+      `Run skipped ${run.counts.malformed} malformed event(s); repair the journal and rebuild before activating.`,
     );
   }
 

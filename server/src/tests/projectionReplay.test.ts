@@ -27,6 +27,7 @@ import { appendToJournal, normalizePayload, type JournalEntry } from "../service
 import {
   activateRun,
   classifyEvent,
+  parseReplayEvent,
   promptListingProjection,
   readActiveProjectionRow,
   rollbackProjection,
@@ -124,6 +125,30 @@ describe("classifyEvent", () => {
   });
 });
 
+describe("parseReplayEvent", () => {
+  const valid = { eventId: "000000000001-0000000001", ledger: 1, eventType: "PromptCreated", eventVersion: 1, payload: {} };
+
+  it("accepts a well-formed row", () => {
+    expect(parseReplayEvent(valid)).toEqual({ ok: true, event: valid });
+  });
+
+  it("rejects a row without a usable identity and marks it uncheckpointable", () => {
+    expect(parseReplayEvent({ ...valid, eventId: "" })).toMatchObject({ ok: false, checkpointable: false });
+    expect(parseReplayEvent({ ...valid, ledger: -1 })).toMatchObject({ ok: false, checkpointable: false });
+    expect(parseReplayEvent(null)).toMatchObject({ ok: false, checkpointable: false });
+  });
+
+  it("rejects bad type, version or payload but keeps the identity checkpointable", () => {
+    expect(parseReplayEvent({ ...valid, eventType: "" })).toMatchObject({ ok: false, checkpointable: true });
+    expect(parseReplayEvent({ ...valid, eventVersion: 0 })).toMatchObject({
+      ok: false,
+      reason: "eventVersion must be a positive integer",
+      checkpointable: true,
+    });
+    expect(parseReplayEvent({ ...valid, payload: [] })).toMatchObject({ ok: false, checkpointable: true });
+  });
+});
+
 describe("replay engine", () => {
   it("normal path: rebuilds the projection across pages and activates it", async () => {
     if (!dbReady) return;
@@ -133,7 +158,7 @@ describe("replay engine", () => {
     const done: any = await runReplay(run.runId, { batchSize: 2 });
 
     expect(done.status).toBe("completed");
-    expect(done.counts).toEqual({ applied: 6, ignored: 1, unsupported: 0 });
+    expect(done.counts).toEqual({ applied: 6, ignored: 1, unsupported: 0, malformed: 0 });
     expect(done.documents).toBe(2);
 
     // Nothing is served until activation.
@@ -181,7 +206,7 @@ describe("replay engine", () => {
     const resumed: any = await runReplay(run.runId, { batchSize: 2 });
     expect(resumed.status).toBe("completed");
     expect(resumed.attempts).toBe(2);
-    expect(resumed.counts).toEqual({ applied: 6, ignored: 1, unsupported: 0 });
+    expect(resumed.counts).toEqual({ applied: 6, ignored: 1, unsupported: 0, malformed: 0 });
 
     await activateRun(run.runId, "ops-alice");
     // The re-processed purchase at ledger 12 was not applied twice.
@@ -239,6 +264,68 @@ describe("replay engine", () => {
     expect(done.counts.unsupported).toBe(1);
     expect(done.unsupportedSamples[0]).toMatchObject({ eventType: "PromptPriceUpdated", eventVersion: 3, ledger: 20 });
     await expect(activateRun(run.runId, "ops-alice")).rejects.toMatchObject({ code: "run_not_activatable" });
+  });
+
+  it("a malformed row stops a strict run, names the event, and keeps the checkpoint before it", async () => {
+    if (!dbReady) return;
+    await seedHistory();
+    const bad = ev(20, "PromptPurchased", { prompt_id: 1n }, 0);
+    await appendToJournal(bad);
+
+    const run = await startReplay({ projection: "prompt_listing", mode: "build", startedBy: "ops-alice" });
+    const stopped: any = await runReplay(run.runId);
+    expect(stopped.status).toBe("failed");
+    expect(stopped.error).toContain("malformed_event: eventVersion must be a positive integer");
+    expect(stopped.error).toContain(bad.eventId);
+    expect(stopped.checkpoint.ledger).toBe(16);
+    await expect(activateRun(run.runId, "ops-alice")).rejects.toMatchObject({ code: "run_not_activatable" });
+  });
+
+  it("lenient mode skips a malformed row, samples it, and blocks activation", async () => {
+    if (!dbReady) return;
+    await seedHistory();
+    const bad = ev(20, "PromptPurchased", { prompt_id: 1n }, 0);
+    await appendToJournal(bad);
+
+    const run = await startReplay({ projection: "prompt_listing", mode: "build", strict: false, startedBy: "ops-alice" });
+    const done: any = await runReplay(run.runId);
+    expect(done.status).toBe("completed");
+    expect(done.counts.malformed).toBe(1);
+    expect(done.malformedSamples).toEqual([
+      { eventId: bad.eventId, ledger: 20, reason: "eventVersion must be a positive integer" },
+    ]);
+    await expect(activateRun(run.runId, "ops-alice")).rejects.toMatchObject({ code: "run_not_activatable" });
+  });
+
+  it("refuses to resume from a checkpoint event that has left the journal", async () => {
+    if (!dbReady) return;
+    await seedHistory();
+    const run = await startReplay({ projection: "prompt_listing", mode: "build", startedBy: "ops-alice" });
+    await ProjectionRun.updateOne(
+      { runId: run.runId },
+      { $set: { status: "failed", checkpoint: { ledger: 12, eventId: "000000000012-missing" } } },
+    );
+
+    const failed: any = await runReplay(run.runId);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toMatch(/^checkpoint_event_missing: event 000000000012-missing at ledger 12/);
+    expect(await ProjectionDocument.countDocuments({ runId: run.runId })).toBe(0);
+  });
+
+  it("a reducer that throws stops the run at that event, with the event named and the checkpoint before it", async () => {
+    if (!dbReady) return;
+    await seedHistory();
+    const realApply = promptListingProjection.apply;
+    vi.spyOn(promptListingProjection, "apply").mockImplementation((current: any, event: any) => {
+      if (event.ledger === 12) throw new Error("unexpected purchase shape");
+      return realApply(current, event);
+    });
+
+    const run = await startReplay({ projection: "prompt_listing", mode: "build", startedBy: "ops-alice" });
+    const failed: any = await runReplay(run.runId);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toMatch(/^apply_failed: PromptPurchased v1 at ledger 12 \(.+\): unexpected purchase shape$/);
+    expect(failed.checkpoint.ledger).toBe(11);
   });
 
   it("rolls activation back to the previous run", async () => {

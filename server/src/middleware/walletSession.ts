@@ -127,10 +127,10 @@ export function requireWalletSession(walletOf: (req: Request) => unknown) {
       payload.nonce,
     );
     if (revocation.revoked) {
+      // User-safe message only: the internal revocation reason stays server-side.
       res.status(401).json({
-        error: "Wallet session has been revoked following a security event.",
+        error: revocation.message,
         code: revocation.code,
-        reason: revocation.reason,
       });
       return;
     }

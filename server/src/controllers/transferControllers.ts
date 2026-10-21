@@ -5,6 +5,7 @@ import User from "../models/User";
 import OwnershipTransfer, {
   TRANSFER_TTL_MS,
 } from "../models/OwnershipTransfer";
+import OwnershipTransferDispute from "../models/OwnershipTransferDispute";
 import { ApprovalService } from "../services/approvalService";
 import { logger } from "../services/structuredLogger";
 import { recordAccessOrOwnershipChange } from "../services/auditTrail";
@@ -116,6 +117,15 @@ export const RequestOwnershipTransfer = async (
   if (active) {
     return res.status(409).json({
       error: "A pending transfer already exists for this listing. Cancel it before requesting another.",
+    });
+  }
+
+  // An open ownership dispute holds the listing (#907): no new handoff until a
+  // maintainer accepts or rejects it.
+  const heldByDispute = await OwnershipTransferDispute.exists({ promptId, status: "open" });
+  if (heldByDispute) {
+    return res.status(423).json({
+      error: "This listing is on hold while an ownership dispute is open.",
     });
   }
 

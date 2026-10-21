@@ -12,6 +12,7 @@ import { recordAccessOrOwnershipChange } from "../services/auditTrail";
 import Prompt from "../models/Prompt";
 import User from "../models/User";
 import OwnershipTransfer from "../models/OwnershipTransfer";
+import OwnershipTransferDispute from "../models/OwnershipTransferDispute";
 import {
   RequestOwnershipTransfer,
   GetOwnershipTransfers,
@@ -96,6 +97,8 @@ describe("RequestOwnershipTransfer (#708)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.restoreAllMocks();
+    // No open dispute holds the listing unless a test says so (#907).
+    vi.spyOn(OwnershipTransferDispute, "exists").mockResolvedValue(null as any);
   });
 
   it("rejects requests without all fields", async () => {
@@ -152,6 +155,26 @@ describe("RequestOwnershipTransfer (#708)", () => {
     expect(mockRes.json).toHaveBeenCalledWith(
       expect.objectContaining({ promptId: "101", status: "pending", toWallet: TO.toLowerCase() }),
     );
+  });
+
+  it("holds the listing with 423 while an open ownership dispute exists, and creates nothing (#907)", async () => {
+    vi.spyOn(Prompt, "findOne").mockReturnValueOnce(
+      chain({ owner: { walletAddress: FROM.toLowerCase() } }) as any,
+    );
+    vi.spyOn(OwnershipTransfer, "updateMany").mockResolvedValue({ modifiedCount: 0 } as any);
+    vi.spyOn(OwnershipTransfer, "findOne").mockResolvedValue(null);
+    vi.spyOn(OwnershipTransferDispute, "exists").mockResolvedValue({ _id: objectId() } as any);
+    const create = vi.spyOn(OwnershipTransfer, "create");
+
+    const mockRes = res();
+    await RequestOwnershipTransfer(
+      req({ body: { promptId: "101", fromWallet: FROM, toWallet: TO } }) as Request,
+      mockRes as Response,
+    );
+
+    expect(OwnershipTransferDispute.exists).toHaveBeenCalledWith({ promptId: "101", status: "open" });
+    expect(mockRes.status).toHaveBeenCalledWith(423);
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("returns 409 when a pending request already exists", async () => {

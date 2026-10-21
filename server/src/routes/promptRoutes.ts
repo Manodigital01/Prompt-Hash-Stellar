@@ -30,6 +30,12 @@ import {
   CancelOwnershipTransfer,
 } from "../controllers/transferControllers";
 import {
+  AddOwnershipDisputeEvidence,
+  GetOwnershipDispute,
+  OpenOwnershipDispute,
+  WithdrawOwnershipDispute,
+} from "../controllers/ownershipDisputeControllers";
+import {
   ResolvePromptPermalink,
   RenamePromptRecord,
   ArchivePromptRecord,
@@ -207,6 +213,15 @@ promptRouter.post("/transfers/request", transferSession, transferRiskGuard, requ
 promptRouter.get("/transfers/:walletAddress", GetOwnershipTransfers);
 promptRouter.post("/transfers/:transferId/respond", transferSession, transferRiskGuard, requireIdempotency, RespondOwnershipTransfer);
 promptRouter.post("/transfers/:transferId/cancel", transferSession, transferRiskGuard, requireIdempotency, CancelOwnershipTransfer);
+
+// Ownership disputes (#907): either party to an approved transfer may contest
+// it within the dispute window. The acting wallet must hold a wallet session.
+const disputeSession = requireWalletSession((req) => req.body?.walletAddress);
+const disputeReadSession = requireWalletSession((req) => req.query?.walletAddress);
+promptRouter.post("/transfers/:transferId/disputes", disputeSession, requireIdempotency, OpenOwnershipDispute);
+promptRouter.get("/transfers/disputes/:disputeId", disputeReadSession, GetOwnershipDispute);
+promptRouter.post("/transfers/disputes/:disputeId/evidence", disputeSession, requireIdempotency, AddOwnershipDisputeEvidence);
+promptRouter.post("/transfers/disputes/:disputeId/withdraw", disputeSession, requireIdempotency, WithdrawOwnershipDispute);
 
 // ── User Preference (non-authoritative, wallet-signature required) ────────────
 promptRouter.post("/buyer/save", SavePrompt);
