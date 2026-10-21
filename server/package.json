@@ -17,6 +17,7 @@
     "worker:build": "node build/jobs/index.js",
     "start": "node build/server.js",
     "backup": "ts-node scripts/runBackup.ts",
+    "backup:validate": "ts-node src/scripts/validateBackupSnapshot.ts",
     "reindex": "ts-node scripts/reIndexFromLedger.ts",
     "reindex:dry-run": "ts-node scripts/reIndexFromLedger.ts --dry-run",
     "schema:compat": "ts-node scripts/checkSchemaCompatibility.ts",

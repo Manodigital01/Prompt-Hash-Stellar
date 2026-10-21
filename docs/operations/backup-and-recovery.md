@@ -250,3 +250,39 @@ Or use the weekly cleanup snippet in `server/backup.crontab` (requires AWS CLI o
 - [Runbook](./runbook.md) — Operational monitoring and debugging
 - [Incident Response](./incident-response.md) — Escalation procedures
 - [Security Audit](../security-audit.md) — AUD-06: key material storage
+
+---
+
+## Snapshot validation (#906)
+
+`npm run backup:validate` checks a local snapshot before it is relied on. It
+never connects to a database or writes to the snapshot.
+
+```bash
+cd server
+npm run backup:validate -- --dir ./backups --timestamp 2026-10-20T00-00-00-000Z \
+  [--expect-manifest-sha256 <hex>] [--out ./report.json]
+```
+
+`--expect-manifest-sha256` takes the hash recorded for the backup
+(`BackupRun.manifestSha256`). Without it the manifest is checked for structure
+only, because `manifest.json` on disk does not carry its own hash. A report file
+is written only when `--out` is given. Exit codes: `0` clean, `1` issues found,
+`2` usage or unreadable snapshot.
+
+What it checks:
+
+- **Manifest and files:** a readable version `1.0.0` manifest; each collection
+  file present, decompressible, with the manifest's SHA-256 and byte size.
+- **Missing and corrupt records:** `record_count_mismatch` reports fewer
+  (`missing`) or more (`unexpected`) records than the manifest; `malformed_record`
+  reports the line number of a line that is not a JSON object.
+- **Duplicate keys:** repeated `_id` in a collection, and two prompt versions
+  sharing an index.
+- **Orphaned references:** a purchase or prompt version whose `promptId` has no
+  prompt in the snapshot.
+- **Inconsistent state:** indexer finality (`lastFinalizedLedger`) ahead of
+  indexing (`lastIndexedLedger`), or non-integer ledger and version indexes.
+
+The rules live in `server/src/services/backupSnapshotValidation.ts`. The live
+database invariants (#816) are separate: see `disaster-recovery.md`.
