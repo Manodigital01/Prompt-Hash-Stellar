@@ -56,3 +56,32 @@ graph TD
   If a security alert is verified as a false positive, authorized operators (`admin` or `security:revoke`) can call `reinstateSubject(subject, actor, reason)`. The subject's cutoff is removed, immediately restoring valid access and recording an audit trail entry.
 - **Audit Logging**:
   All security events and reinstatements are logged in the immutable security audit log (`getAuditTrail()`).
+
+---
+
+## 6. Security Event Policy and User Messaging (#908)
+
+`SECURITY_EVENT_POLICY` in `sessionRevocationService.ts` says which events end
+sessions, and how far:
+
+| Event | Scope | When to use |
+| --- | --- | --- |
+| `credential_change` | Subject | Password or key changed |
+| `role_change` | Subject | Role or permission level changed for the account |
+| `account_recovery` | Subject | Recovery flow completed |
+| `explicit_logout_all` | Subject | User asked to sign out everywhere |
+| `wallet_compromise`, `suspicious_activity`, `permission_revocation`, `admin_key_rotation` | Subject | As named |
+| `global_emergency_cutoff` | Global (`*`) | Platform-wide secret rotation only |
+
+Call `invalidateSessionsForSecurityEvent(registry, input)` in the same request
+that changes the credential, role or recovery state. It enforces the scope: a
+subject event must name one account, and a global event must target `*`.
+
+**User messages.** A rejected session gets `401` with `error` (a user-safe
+message from the event policy) and `code`. The internal `reason` is never
+returned to the client. Operators read it from the registry status and the
+audit trail.
+
+**Unaffected sessions.** Subject events only cut off that account. Other
+accounts' sessions keep working, and sessions issued after the event sign in
+normally.

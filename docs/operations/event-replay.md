@@ -132,3 +132,24 @@ covers them.
   ledger. Entries are processed in `(ledger, eventId)` order.
 - **Large rebuilds:** progress is visible on the run (`checkpoint`, `counts`),
   and a worker can be stopped at any time and resumed later.
+
+## Malformed rows, missing checkpoints and apply failures (#905)
+
+Every row is checked before a reducer sees it (`parseReplayEvent`). A row with
+an unusable identity (`eventId`, `ledger`) cannot be checkpointed past, so it
+stops every mode. Other malformed rows (empty `eventType`, `eventVersion` below
+1, non-object `payload`) stop strict runs and are skipped and sampled in lenient
+runs. A run that skipped any malformed row cannot be activated.
+
+Each failure is recorded on the run with the event that caused it:
+
+| Error prefix | Cause | Run state |
+| --- | --- | --- |
+| `malformed_event:` | Row fails the shape check | Failed at the checkpoint before the row (strict), or skipped and counted in `counts.malformed` (lenient) |
+| `unsupported_version:` | Event version unknown to the reducer | Failed at the checkpoint before the row (strict) |
+| `apply_failed:` | Reducer threw on an event | Failed at the checkpoint before that event; nothing after it is applied |
+| `checkpoint_event_missing:` | The checkpoint event is no longer in the journal | Failed before any row is written; start a new run |
+
+The checkpoint event is verified before a resumed run applies anything, so a
+journal that lost history cannot be rebuilt silently over the gap. Start a fresh
+build run after restoring the journal.
