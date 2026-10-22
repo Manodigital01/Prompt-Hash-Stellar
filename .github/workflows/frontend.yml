@@ -64,6 +64,8 @@ jobs:
 
       - name: Install dependencies
         run: yarn install
+        env:
+          YARN_ENABLE_HARDENED_MODE: false
 
       - name: Export regenerated Yarn lockfile
         uses: actions/upload-artifact@v7
