@@ -150,6 +150,7 @@ Marks a prompt as archived and removes it from active workflow views.
 ### Resolve a prompt permalink
 
 `GET /api/prompts/permalink/:identifier`
+Alias: `GET /api/prompts/resolve/:identifier`
 
 Resolves a prompt by its current or historical slug, on-chain ID, or record ID.
 The response includes sanitized public metadata. Historical slugs return a

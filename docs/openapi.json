@@ -774,6 +774,62 @@
         }
       }
     },
+    "/api/prompts/resolve/{identifier}": {
+      "get": {
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Resolve a prompt permalink (alias)",
+        "description": "Alias for GET /api/prompts/permalink/{identifier}. Resolves current or historical slugs, on-chain IDs, or record IDs with the same sanitized responses and redirect behavior.",
+        "operationId": "resolvePromptIdentifier",
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "viewerWallet",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-wallet-address",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active or archived prompt resolved with sanitized record metadata."
+          },
+          "301": {
+            "description": "Historical slug resolved to its canonical permalink."
+          },
+          "403": {
+            "description": "The prompt is restricted and the viewer is not authorized."
+          },
+          "404": {
+            "description": "No prompt matches the identifier."
+          },
+          "410": {
+            "description": "The prompt has been deleted."
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
     "/api/prompts/receipt": {
       "get": {
         "tags": [
