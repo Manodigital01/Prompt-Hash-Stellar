@@ -713,6 +713,67 @@
         }
       }
     },
+    "/api/prompts/permalink/{identifier}": {
+      "get": {
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Resolve a prompt permalink",
+        "description": "Resolves a prompt by its current or historical slug, on-chain ID, or record ID. Responses use sanitized public metadata. Renamed records return a 301 redirect; restricted and deleted records do not expose private prompt content.",
+        "operationId": "resolvePromptPermalink",
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "viewerWallet",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional viewer wallet used to determine whether a restricted listing may be shown."
+          },
+          {
+            "name": "x-wallet-address",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Alternative to viewerWallet for identifying the viewer."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active or archived prompt resolved with sanitized record metadata."
+          },
+          "301": {
+            "description": "Historical slug resolved to its canonical permalink."
+          },
+          "400": {
+            "description": "The identifier is missing or invalid."
+          },
+          "403": {
+            "description": "The prompt is restricted and the viewer is not authorized."
+          },
+          "404": {
+            "description": "No prompt matches the identifier."
+          },
+          "410": {
+            "description": "The prompt has been deleted."
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
     "/api/prompts/receipt": {
       "get": {
         "tags": [

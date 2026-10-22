@@ -147,6 +147,16 @@ Example error response:
 
 Marks a prompt as archived and removes it from active workflow views.
 
+### Resolve a prompt permalink
+
+`GET /api/prompts/permalink/:identifier`
+
+Resolves a prompt by its current or historical slug, on-chain ID, or record ID.
+The response includes sanitized public metadata. Historical slugs return a
+permanent redirect to the canonical permalink. Restricted and deleted records
+do not expose private prompt content; an optional `viewerWallet` query parameter
+or `x-wallet-address` header can identify an authorized viewer.
+
 ## Buyer Library Endpoints
 
 ### Get owned prompts
